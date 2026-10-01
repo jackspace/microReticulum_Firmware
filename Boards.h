@@ -356,7 +356,9 @@
       #endif
 
     #elif BOARD_MODEL == BOARD_HELTEC32_V2
-      #define HAS_DISPLAY true
+      #if !defined(HELTEC_WIRELESS_BRIDGE) // the Wireless Bridge has the same radio wiring but no OLED
+        #define HAS_DISPLAY true
+      #endif
       #define HAS_BLUETOOTH true
       #define HAS_CONSOLE true
       #define HAS_EEPROM true
