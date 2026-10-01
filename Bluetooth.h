@@ -56,6 +56,8 @@ char bt_devname[11];
 #if MCU_VARIANT == MCU_ESP32
   #if HAS_BLUETOOTH == true
 
+    bool bt_stack_deferred = false;  // set when bt_setup_hw() skipped the stack (Bluetooth disabled at boot)
+
     void bt_confirm_pairing(uint32_t numVal) {
       bt_ssp_pin = numVal;
       kiss_indicate_btpin();
@@ -78,6 +80,15 @@ char bt_devname[11];
     void bt_start() {
       display_unblank();
       if (bt_state == BT_STATE_OFF) {
+        if (bt_stack_deferred) {
+          // Starting Bluedroid this late panics in bta_sys_init; save "enabled" and
+          // restart so the next boot brings the stack up the normal way.
+          EEPROM.write(eeprom_addr(ADDR_CONF_BT), BT_ENABLE_BYTE);
+          EEPROM.commit();
+          printf("[bt] enabled after a disabled boot: restarting to start the stack\r\n");
+          delay(100);
+          ESP.restart();
+        }
         SerialBT.begin(bt_devname);
         bt_state = BT_STATE_ON;
        }
@@ -119,12 +130,34 @@ char bt_devname[11];
       }
     }
 
+    #if __has_include(<esp_mac.h>)
+      #include <esp_mac.h>
+    #else
+      #include <esp_system.h>
+    #endif
     bool bt_setup_hw() {
       if (!bt_ready) {
         if (EEPROM.read(eeprom_addr(ADDR_CONF_BT)) == BT_ENABLE_BYTE) {
           bt_enabled = true;
         } else {
           bt_enabled = false;
+        }
+        // With Bluetooth disabled, name the device from the BT MAC without starting the stack:
+        // btStart() and Bluedroid take about 85 KB of heap, which boards without PSRAM can't spare.
+        if (!bt_enabled) {
+          uint8_t bda[6];
+          if (esp_read_mac(bda, ESP_MAC_BT) != ESP_OK) { return false; }
+          char *data = (char*)malloc(BT_DEV_ADDR_LEN+1);
+          for (int i = 0; i < BT_DEV_ADDR_LEN; i++) { data[i] = bda[i]; }
+          data[BT_DEV_ADDR_LEN] = EEPROM.read(eeprom_addr(ADDR_SIGNATURE));
+          unsigned char *hash = MD5::make_hash(data, BT_DEV_ADDR_LEN);
+          memcpy(bt_dh, hash, BT_DEV_HASH_LEN);
+          sprintf(bt_devname, "RNode %02X%02X", bt_dh[14], bt_dh[15]);
+          free(data);
+          printf("[bt] disabled: stack not started, name %s\r\n", bt_devname);
+          bt_ready = true;  // device_init() gates on it; its other reader, update_bt(), only times out pairing
+          bt_stack_deferred = true;  // bt_start() restarts into the full path if Bluetooth is enabled later
+          return true;
         }
         if (btStart()) {
           if (esp_bluedroid_init() == ESP_OK) {
